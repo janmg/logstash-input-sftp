@@ -7,6 +7,7 @@ require "stud/interval"
 require "net/sftp"
 require "rufus/scheduler"
 require "date"
+require 'stringio'
 
 # This is a plugin for logstash to sftp download file and parse
 # Orginally from nabilbendafi
@@ -48,6 +49,7 @@ class LogStash::Inputs::SFTP < LogStash::Inputs::Base
 
   # Remote SFTP path and local path
   config :remote_path, :validate => :path, :required => true
+  config :globformat, :validate => :string, :default => "**/*.log" 
   # obsolete
   config :local_path, :validate => :path, :required => false
 
@@ -83,45 +85,65 @@ def run(queue)
     newreg   = Hash.new
     filelist = Hash.new
     worklist = Hash.new
+
+    # remove non-supported ecdsa and ecdh (jruby-openssl) keyexchanges and by now insecure sha2
+    Net::SSH::Transport::Algorithms::ALGORITHMS.values.each { |algs| algs.reject! { |a| a =~ /^ecd(sa|h)-sha2/ } }
+    Net::SSH::KnownHosts::SUPPORTED_TYPE.reject! { |t| t =~ /^ecd(sa|h)-sha2/ }
+
     while !stop?
       chrono = Time.now.to_i
       # filelist = sftp.dir.glob("/remote/path", "**/*.rb") do |entry|
       #Net::SFTP.start('host', 'username', :password => 'password') do |sftp|
       Net::SFTP.start(@remote_host, @username, :keys => @keyfile_path) do |sftp|
-       sftp.dir.foreach(remote_path) do |entry|
-         @logger.info("files seen: #{entry}")
+       sftp.dir.glob(remote_path, globformat) do |entry|
+       #sftp.dir.foreach(remote_path) do |entry|
+         @logger.info("files seen: #{entry.name}")
+	 @logger.info("files seen: #{entry.attributes.owner} and #{entry.attributes.size}")
+	 # are attributes also accessible directly? or only through 'name' 
+	 # https://github.com/net-ssh/net-sftp/blob/master/lib/net/sftp/protocol/06/attributes.rb
+	 # https://github.com/net-ssh/net-sftp/blob/master/lib/net/sftp/protocol/04/name.rb
          off = 0
          begin
              off = @registry[name][:offset]
          rescue
              off = 0
          end
-         newreg.store(entry.name, { :offset => off, :length => entry.lenth })
+	 newreg.store(entry.name, { :offset => off, :length => entry.attributes.size, :mtime => entry.attributes.mtime })
+	 #newreg.store(entry.name, { :offset => off })
        end
       end        
       # Worklist is the subset of files where the already read offset is smaller than the file size
       worklist.clear
       worklist = newreg.select {|name,file| file[:offset] < file[:length]}
-      worklist.each do |name, file|
+      #worklist = newreg
 
-      @logger.info("Prepare to download #{remote_host}:#{entry.longname} to #{local_path}")
+      counter = 0
+      content = StringIO.new
+      worklist.each do |name,entry|
+      @logger.info("Prepare to download #{remote_host}:#{name}")
       if @password.nil?
         Net::SFTP.start(@remote_host, @username, :keys => @keyfile_path) do |sftp|
-          content = sftp.download!(@remote_path)
+          io = StringIO.new
+         #sftp.download!("#{@sftp_details['server_folder_path']}/#{entry.name}", io.puts, :read_size => 16000))
+	  sftp.download!(@remote_path+"/"+name, io.puts)
+	  @logger.info("#{io.closed?} #{io.closed_read?} #{io.closed_write?}")
+          counter = process(queue, io)
         end
       else
         Net::SFTP.start(@remote_host, @username, :password => @password) do |sftp|
-          content = sftp.download!(@remote_path)
+          sftp.download!(@remote_path+"/"+name, content)
+          counter = process(queue, content)
         end
       end
-      values=content.split(@delimiter)
-      counter = 0
-      values.each do |value|
-        counter = 0
-        counter += 1
-        event = LogStash::Event.new("message" => value)
-        queue << event
-      end
+      # strio / reopen
+      # rewind / seek / rewind / size
+      #content.reopen(content,'r')
+#      @logger.info("#{content.closed?} #{content.closed_read?} #{content.closed_write?}")
+#      content.each_line() do |value|
+#        counter += 1
+#        event = LogStash::Event.new("message" => value)
+#        queue << event
+#      end
       @logger.info("#{local_path} has processed #{counter} events, now waiting #{interval}, until it will download and process again")
 
         # save the registry past the regular intervals
@@ -161,8 +183,17 @@ def close
 end
 
 
+def process(queue, content)
+      counter = 0
+      content.each_line() do |value|
+        counter += 1
+        event = LogStash::Event.new("message" => value)
+        queue << event
+      end
+      return counter
+end
 
-def process(queue)
+def xxxxprocess(queue)
 =begin
     unless @replaceStr.nil?
       if @remote_path.include?(@replaceStr)
@@ -174,7 +205,7 @@ def process(queue)
       end
     end
 =end
-    @logger.info("Prepare to download #{remote_host}:#{entry.longname} to #{local_path}")
+    @logger.info("Prepare to download #{remote_host}:#{entry.name}")
     if @password.nil?
         Net::SFTP.start(@remote_host, @username, :keys => @keyfile_path) do |sftp|
           content = sftp.download!(@remote_path)
