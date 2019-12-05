@@ -127,9 +127,11 @@ def run(queue)
         else
           Net::SFTP.start(@remote_host, @username, :password => @password) do |sftp|
             io = StringIO.new
-	    sftp.download!(@remote_path+"/"+name, io)
-            counter = process(queue, io)
-          end
+            sftp.download!(@remote_path+"/"+name, io)
+            @logger.info("#{io.string} #{io.size}")
+            length = io.size
+            counter = process(queue, io.string)
+	  end
         end
 	@registry.store(name, { :offset => length, :length => length, :mtime => entry[:mtime] })
         @logger.info("#{remote_path} has processed #{counter} events, now waiting #{interval}, until it will download and process again")
