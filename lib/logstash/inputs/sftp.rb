@@ -7,7 +7,7 @@ require "stud/interval"
 require "net/sftp"
 require "rufus/scheduler"
 require "date"
-require 'stringio'
+require "stringio"
 
 # This is a plugin for logstash to sftp download file and parse
 # Orginally from nabilbendafi
@@ -76,13 +76,12 @@ def register
     end
 
     @processed = 0
-    @regsaved = @processed
+    @regsaved = 0
 end # def register
 
 
 
 def run(queue)
-    newreg   = Hash.new
     filelist = Hash.new
     worklist = Hash.new
 
@@ -96,55 +95,44 @@ def run(queue)
       #Net::SFTP.start('host', 'username', :password => 'password') do |sftp|
       Net::SFTP.start(@remote_host, @username, :keys => @keyfile_path) do |sftp|
        sftp.dir.glob(remote_path, globformat) do |entry|
-       #sftp.dir.foreach(remote_path) do |entry|
-         @logger.info("files seen: #{entry.name}")
-	 @logger.info("files seen: #{entry.attributes.owner} and #{entry.attributes.size}")
-	 # are attributes also accessible directly? or only through 'name' 
+         @logger.info("files seen: #{entry.name} #{entry.attributes.owner} and #{entry.attributes.size} #{entry.attributes.mtime}")
 	 # https://github.com/net-ssh/net-sftp/blob/master/lib/net/sftp/protocol/06/attributes.rb
 	 # https://github.com/net-ssh/net-sftp/blob/master/lib/net/sftp/protocol/04/name.rb
          off = 0
          begin
-             off = @registry[name][:offset]
+             off = @registry[entry.name][:offset]
          rescue
              off = 0
          end
-	 newreg.store(entry.name, { :offset => off, :length => entry.attributes.size, :mtime => entry.attributes.mtime })
+	 filelist.store(entry.name, { :offset => off, :length => entry.attributes.size, :mtime => entry.attributes.mtime })
+	 @logger.info("#{filelist[entry.name]}")
 	 #newreg.store(entry.name, { :offset => off })
        end
       end        
       # Worklist is the subset of files where the already read offset is smaller than the file size
       worklist.clear
-      worklist = newreg.select {|name,file| file[:offset] < file[:length]}
-      #worklist = newreg
-
-      counter = 0
-      content = StringIO.new
+      worklist = filelist.select {|name,file| file[:offset] < file[:length]}
       worklist.each do |name,entry|
       @logger.info("Prepare to download #{remote_host}:#{name}")
-      if @password.nil?
-        Net::SFTP.start(@remote_host, @username, :keys => @keyfile_path) do |sftp|
-          io = StringIO.new
-         #sftp.download!("#{@sftp_details['server_folder_path']}/#{entry.name}", io.puts, :read_size => 16000))
-	  sftp.download!(@remote_path+"/"+name, io.puts)
-	  @logger.info("#{io.closed?} #{io.closed_read?} #{io.closed_write?}")
-          counter = process(queue, io)
+        counter = 0
+	length = 0
+        if @password.nil?
+          Net::SFTP.start(@remote_host, @username, :keys => @keyfile_path) do |sftp|
+            io = StringIO.new
+            sftp.download!(@remote_path+"/"+name, io)
+	    @logger.info("#{io.string} #{io.size}")
+	    length = io.size
+	    counter = process(queue, io.string)
+          end
+        else
+          Net::SFTP.start(@remote_host, @username, :password => @password) do |sftp|
+            io = StringIO.new
+	    sftp.download!(@remote_path+"/"+name, io)
+            counter = process(queue, io)
+          end
         end
-      else
-        Net::SFTP.start(@remote_host, @username, :password => @password) do |sftp|
-          sftp.download!(@remote_path+"/"+name, content)
-          counter = process(queue, content)
-        end
-      end
-      # strio / reopen
-      # rewind / seek / rewind / size
-      #content.reopen(content,'r')
-#      @logger.info("#{content.closed?} #{content.closed_read?} #{content.closed_write?}")
-#      content.each_line() do |value|
-#        counter += 1
-#        event = LogStash::Event.new("message" => value)
-#        queue << event
-#      end
-      @logger.info("#{local_path} has processed #{counter} events, now waiting #{interval}, until it will download and process again")
+	@registry.store(name, { :offset => length, :length => length, :mtime => entry[:mtime] })
+        @logger.info("#{remote_path} has processed #{counter} events, now waiting #{interval}, until it will download and process again")
 
         # save the registry past the regular intervals
         now = Time.now.to_i
@@ -158,82 +146,40 @@ def run(queue)
       sleeptime = interval - (Time.now.to_i - chrono)
       Stud.stoppable_sleep(sleeptime) { stop? }
     end
-=begin
-    if @schedule
-      @scheduler = Rufus::Scheduler.new(:max_work_threads => 1)
-      @scheduler.cron @schedule do
-        process(queue)
-      end
-      @scheduler.join
-    else
-      process(queue)
-    end
-    save_registry(@registry)
-=end
-end # def run
+end
 
 
 
 def stop
   @scheduler.shutdown(:wait) if @scheduler
   save_registry(@registry)
-end # def stop
+end
 def close
   stop
 end
 
 
+private
 def process(queue, content)
       counter = 0
       content.each_line() do |value|
+        @logger.debug(">> #{value}")
         counter += 1
-        event = LogStash::Event.new("message" => value)
+	event = LogStash::Event.new("message" => value.chomp)
         queue << event
       end
+      @processed += counter
       return counter
-end
-
-def xxxxprocess(queue)
-=begin
-    unless @replaceStr.nil?
-      if @remote_path.include?(@replaceStr)
-        d = DateTime.now
-        temp=d.strftime("%Y%m%d")
-        @remote_path.gsub!(@replaceStr, temp)
-        @replaceStr=temp
-        @logger.info(@replaceStr)
-      end
-    end
-=end
-    @logger.info("Prepare to download #{remote_host}:#{entry.name}")
-    if @password.nil?
-        Net::SFTP.start(@remote_host, @username, :keys => @keyfile_path) do |sftp|
-          content = sftp.download!(@remote_path)
-        end
-      else 
-        Net::SFTP.start(@remote_host, @username, :password => @password) do |sftp|
-          content = sftp.download!(@remote_path)
-        end
-      end
-      values=content.split(@delimiter)
-      counter = 0
-      values.each do |value|
-        counter = 0
-        counter += 1
-        event = LogStash::Event.new("message" => value)
-        queue << event
-      end
-      @logger.info("#{local_path} has processed #{counter} events, now waiting #{interval}, until it will download and process again")
 end
 
 
 def save_registry(filelist)
     unless @processed == @regsaved
         @regsaved = @processed
-        @logger.info(@pipe_id+" processed #{@processed} events, saving #{filelist.size} files and offsets to registry #{registry_path}")
+        @logger.info("processed #{@processed} events, saving #{filelist.size} files and offsets to registry #{registry_path}")
         Thread.new {
             begin
-                @blob_client.create_block_blob(container, registry_path, Marshal.dump(filelist))
+                File.open(@registry_path, 'wb') {|f| f.write(Marshal.dump(filelist))}
             rescue
                 @logger.error(@pipe_id+" Oh my, registry write failed, do you have write access?")
             end
