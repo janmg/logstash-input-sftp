@@ -69,7 +69,7 @@ def register
     @logger.info("Registering SFTP Input", :username => @username, :remote_host => @remote_host, :port => @port, :remote_path => @remote_path, :schedule => @schedule)
     @registry = Hash.new
     begin
-      @registry = Marshal.load(@registry_path)
+      @registry = Marshal.load(File.read(@registry_path))
     rescue Exception => e
       @logger.error(" caught: #{e.message}")
       @registry.clear
@@ -92,8 +92,8 @@ def run(queue)
     while !stop?
       chrono = Time.now.to_i
       # filelist = sftp.dir.glob("/remote/path", "**/*.rb") do |entry|
-      #Net::SFTP.start('host', 'username', :password => 'password') do |sftp|
-      Net::SFTP.start(@remote_host, @username, :keys => @keyfile_path) do |sftp|
+      Net::SFTP.start(@remote_host, @username, :password => @password) do |sftp|
+      #Net::SFTP.start(@remote_host, @username, :keys => @keyfile_path) do |sftp|
        sftp.dir.glob(remote_path, globformat) do |entry|
          @logger.info("files seen: #{entry.name} #{entry.attributes.owner} and #{entry.attributes.size} #{entry.attributes.mtime}")
 	 # https://github.com/net-ssh/net-sftp/blob/master/lib/net/sftp/protocol/06/attributes.rb
@@ -120,7 +120,6 @@ def run(queue)
           Net::SFTP.start(@remote_host, @username, :keys => @keyfile_path) do |sftp|
             io = StringIO.new
             sftp.download!(@remote_path+"/"+name, io)
-	    @logger.info("#{io.string} #{io.size}")
 	    length = io.size
 	    counter = process(queue, io.string)
           end
@@ -128,7 +127,6 @@ def run(queue)
           Net::SFTP.start(@remote_host, @username, :password => @password) do |sftp|
             io = StringIO.new
             sftp.download!(@remote_path+"/"+name, io)
-            @logger.info("#{io.string} #{io.size}")
             length = io.size
             counter = process(queue, io.string)
 	  end
